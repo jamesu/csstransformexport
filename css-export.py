@@ -584,7 +584,7 @@ def exportObjects(list, doc, style):
 					if img != None:
 						# Image file
 						name = img.getFilename()
-						style.append("background-image: url(\"%s.png\");\n" % noext(name))
+						style.append("background-image: url(\"%s.png\");\n" % noext(basename(name)))
 						
 						# Background position
 						uv_min, uv_max = obj.getUVBounds()
