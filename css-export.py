@@ -6,7 +6,7 @@ Tooltip: 'Export to a webkit-compatible HTML document.'
 """
 
 """
-Copyright (C) 2009 James S Urquhart (contact@jamesu.net)
+Copyright (C) 2009-2010 James S Urquhart (contact@jamesu.net)
 
 This program is free software; you can redistribute it and/or modify it 
 under the terms of the GNU General Public License as published by the 
@@ -31,7 +31,8 @@ import string
 from Blender import Draw
 
 CONFIG = {
-	'ANIM_LOOP': True,             #Â Animations loop
+    'ANIM_TRACK_ONLY': False,      # Only export CSS tracks
+	'ANIM_LOOP': True,             #  Animations loop
 	'ANIM_BAKE': True,             # Sample animation each frame (interpolation will be forced to linear)
 	'EXPORT_3D' : False,           # Incorporates Z axis and camera perspective
 	'SWITCH_AXIS' : False,         # Switch Z and Y axes (useful if incoporating simulated physics)
@@ -49,10 +50,17 @@ WEBKIT_TPL = """
 <head>
 <title>%(title)s</title>
 <style>%(style)s</style>
+<link href=\"%(track_path)s.css\" rel=\"stylesheet\" type=\"text/css\"/>
 </head>
 <body>
 <div id=\"root\">%(scene)s</div>
 </body>
+</html>
+"""
+
+TRACKS_TPL = """
+/* Animation keyframes */
+%(content)s
 """
 
 # END TEMPLATES
@@ -477,7 +485,7 @@ def importObjects(list, out_list, anims_list, parent=None):
 		ipo = obj.getIpo()
 		built_object = SimpleObject(obj)
 		
-		if ipo != None:
+		if ipo != None and ipo.getNcurves() > 0:
 			anims_list.append(built_object.importIpo(ipo))
 		
 		# Insert into correct list
@@ -651,11 +659,13 @@ def exportWebkit(objects, anims):
 	
 	className = noext(basename(Blender.Get("filename")))
 	classPath = basepath(Blender.Get("filename"))
+	animName = "%s-%s" % (className, Blender.Scene.GetCurrent().getName()) 
 	doBake = CONFIG["ANIM_BAKE"]
 	
+	tracks = []
 	# Animation keyframes
 	for anim in anims:
-		style.append("@-webkit-keyframes %s {\n" % anim.identifier)
+		tracks.append("@-webkit-keyframes %s {\n" % anim.identifier)
 		
 		earliest = anim.start
 		fl = anim.len-1
@@ -667,20 +677,27 @@ def exportWebkit(objects, anims):
 			percent = float(frame[0] - earliest) / fl
 			fid = ("%2.2f" % (percent*100)) + "%"
 			
-			style.append("%s {\n" % fid)
-			style.append("-webkit-transform: %s;\n" % frame[1].transformValue())
+			tracks.append("%s {\n" % fid)
+			tracks.append("-webkit-transform: %s;\n" % frame[1].transformValue())
 			if not doBake:
-				style.append("-webkit-animation-timing-function: %s;\n" % InterpolationLookup[frame[2]])
-			style.append("}\n")
+				tracks.append("-webkit-animation-timing-function: %s;\n" % InterpolationLookup[frame[2]])
+			tracks.append("}\n")
 		
-		style.append("}\n")
+		tracks.append("}\n")
 	
-	substitutions = {'title': className, 'style': "".join(style), 'scene': "".join(doc)}
+	substitutions = {'title': className, 'style': "".join(style), 'track_path':animName, 'scene': "".join(doc)}
+	css_substitutions = {'content': "".join(tracks)}
+	
+	# Dump tracks
+	fs = open("%s/%s.css" % (classPath, animName), "w")
+	fs.write(TRACKS_TPL % css_substitutions)
+	fs.close()
 	
 	# Dump to document
-	fs = open("%s/%s.html" % (classPath, className), "w")
-	fs.write(WEBKIT_TPL % substitutions)
-	fs.close()
+	if not CONFIG["ANIM_TRACK_ONLY"]:
+		fs = open("%s/%s.html" % (classPath, className), "w")
+		fs.write(WEBKIT_TPL % substitutions)
+		fs.close()
 
 # Recursively makes sure child elements have anim tracks (for collapsed transforms)
 def recursiveAnimClone(obj, new_anims):
@@ -747,6 +764,7 @@ def event(evt, val):
 
 export_button = None
 threedee_button = None
+trackonly_button = None
 		
 def doExport(evt, val):
 	return process()
@@ -756,6 +774,9 @@ def doToggle3D(evt, val):
 
 def doToggleLoop(evt, val):
 	CONFIG["ANIM_LOOP"] = val
+
+def doToggleTrack(evt, val):
+	CONFIG["ANIM_TRACK_ONLY"] = val
 
 def doUpdateScale(evt, val):
 	SimpleTransform.GLOBAL_SCALE = val
@@ -770,6 +791,7 @@ def gui():
 	threedee_button = Draw.Toggle("3D", 2, 10, 110, 40, 24, CONFIG["EXPORT_3D"], "3D", doToggle3D)
 	loop_button = Draw.Toggle("Loop", 5, 10, 50, 40, 24, CONFIG["ANIM_LOOP"], "Loop animation track", doToggleLoop)
 	scale_button = Draw.Number('Scale: ', 1000, 60, 110, 120, 24, SimpleTransform.GLOBAL_SCALE, 0.0,10.0, 'Global scale', doUpdateScale, 0.1, 2)
-			
+	trackonly_button = Draw.Toggle("Track Only", 2, 60, 50, 80, 24, CONFIG["ANIM_TRACK_ONLY"], "Track Only", doToggleTrack)
+	
 if __name__ == "__main__":
 	Draw.Register(gui, event, None)
