@@ -368,6 +368,7 @@ class SimpleAnim:
 		self.object = obj
 		self.identifier = obj.name + '-anim'
 		self.matters = None
+		self.animates_layer = False
 		self.frames = None # generated frames
 		self.propertyInterpolation = {}
 		self.start = 0
@@ -380,7 +381,10 @@ class SimpleAnim:
 	
 	def setPropertyInterpolationTypes(self):
 		ipo = self.object.obj.ipo
-		curve = ipo.curves[Blender.Ipo.OB_LOCX]
+		try:
+			curve = ipo.curves[Blender.Ipo.OB_LOCX]
+		except:
+			curve = None
 		if curve != None:
 			self.propertyInterpolation["TRANSFORM"] = curve.interpolation
 	
@@ -407,17 +411,20 @@ class SimpleAnim:
 		
 		checkList = [Blender.Ipo.OB_LOCX, Blender.Ipo.OB_LOCY, Blender.Ipo.OB_LOCZ,
 		             Blender.Ipo.OB_SCALEX, Blender.Ipo.OB_SCALEY, Blender.Ipo.OB_SCALEZ,
-		             Blender.Ipo.OB_ROTX, Blender.Ipo.OB_ROTY, Blender.Ipo.OB_ROTZ]
+		             Blender.Ipo.OB_ROTX, Blender.Ipo.OB_ROTY, Blender.Ipo.OB_ROTZ,
+		             Blender.Ipo.OB_LAYER]
 		# TODO: incorporate ipo from linked material
 		
 		#print "ANIM: %s" % self.identifier
 		curveFrameList = []
 		for curve in checkList:
 			try:
-				cobj = ipo.curves[curve]
+				cobj = ipo[curve]
+				if curve == Blender.Ipo.OB_LAYER:
+					self.animates_layer = True
 			except:
 				continue
-			curveFrames = self.getFrameTimes(ipo.curves[curve])
+			curveFrames = self.getFrameTimes(ipo[curve])
 			if curveFrames != None:
 				curveFrameList.append(curveFrames)
 		
@@ -486,6 +493,7 @@ def importObjects(list, out_list, anims_list, parent=None):
 		built_object = SimpleObject(obj)
 		
 		if ipo != None and ipo.getNcurves() > 0:
+			print "Importing curve for %s" % obj.getName()
 			anims_list.append(built_object.importIpo(ipo))
 		
 		# Insert into correct list
@@ -679,6 +687,11 @@ def exportWebkit(objects, anims):
 			
 			tracks.append("%s {\n" % fid)
 			tracks.append("-webkit-transform: %s;\n" % frame[1].transformValue())
+			if anim.animates_layer:
+				if frame[3]:
+					tracks.append("visibility: hidden;\n")
+				else:
+					tracks.append("visibility: visible;\n")	
 			if not doBake:
 				tracks.append("-webkit-animation-timing-function: %s;\n" % InterpolationLookup[frame[2]])
 			tracks.append("}\n")
@@ -748,10 +761,16 @@ def process():
 		for anim in anims:
 			if anim.matters[fid] or (doBake and anim.encompassesFrame(fid)):
 				# TODO: grab material color, etc
-				interpolation = anim.propertyInterpolation["TRANSFORM"]
+				interpolation = None
+				try:
+					interpolation = anim.propertyInterpolation["TRANSFORM"]
+				except:
+					interpolation = "linear"
+				
 				if doBake:
 					interpolation = "linear"
-				anim.frames.append([fid, anim.object.getTransform(), interpolation])
+				layer_20 = 20 in anim.object.obj.layers
+				anim.frames.append([fid, anim.object.getTransform(), interpolation, layer_20])
 	
 	exportWebkit(objects, anims)
 	
