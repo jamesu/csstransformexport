@@ -382,7 +382,7 @@ class SimpleAnim:
 	def setPropertyInterpolationTypes(self):
 		ipo = self.object.obj.ipo
 		try:
-			curve = ipo.curves[Blender.Ipo.OB_LOCX]
+			curve = ipo[Blender.Ipo.OB_LOCX]
 		except:
 			curve = None
 		if curve != None:
