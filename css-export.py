@@ -51,6 +51,7 @@ WEBKIT_TPL = """
 <title>%(title)s</title>
 <style>%(style)s</style>
 <link href=\"%(track_path)s.css\" rel=\"stylesheet\" type=\"text/css\"/>
+<link href=\"%(track_path)s.overrides.css\" rel=\"stylesheet\" type=\"text/css\"/>
 </head>
 <body>
 <div id=\"root\">%(scene)s</div>
