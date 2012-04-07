@@ -1,12 +1,5 @@
 """
-Name: 'CSS Transform Export (.html)'
-Blender: 249
-Group: 'Export'
-Tooltip: 'Export to a webkit-compatible HTML document.'
-"""
-
-"""
-Copyright (C) 2009-2010 James S Urquhart (contact@jamesu.net)
+Copyright (C) 2009-2012 James S Urquhart (contact@jamesu.net)
 
 This program is free software; you can redistribute it and/or modify it 
 under the terms of the GNU General Public License as published by the 
@@ -24,21 +17,28 @@ Free Software Foundation, Inc., 59 Temple Place,
 Suite 330, Boston, MA 02111-1307 USA
 """
 
-import Blender
+bl_info = {
+    "name": "CSS Transform Export (.html)",
+    "description": "Magically Exports to HTML&CSS Transform",
+    "author": "James Urquhart",
+    "version": (1, 0),
+    "blender": (2, 6, 0),
+    "location": "File > Export > CSS Transform (.html)",
+    "warning": "", # used for warning icon and text in addons panel
+    "wiki_url": "https://github.com/jamesu/csstransformexport",
+    "tracker_url": "https://github.com/jamesu/csstransformexport",
+    "category": "Import-Export"}
+
+import os
+import time
+import bpy
+import mathutils
+import random
+import operator
 import math
 import string
 
-from Blender import Draw
-
-CONFIG = {
-    'ANIM_TRACK_ONLY': False,      # Only export CSS tracks
-	'ANIM_LOOP': True,             #  Animations loop
-	'ANIM_BAKE': True,             # Sample animation each frame (interpolation will be forced to linear)
-	'EXPORT_3D' : False,           # Incorporates Z axis and camera perspective
-	'SWITCH_AXIS' : False,         # Switch Z and Y axes (useful if incoporating simulated physics)
-	'COLLAPSE_TRANSFORMS' : False, # Use world space transforms instead of relying on parent-child transforms. Buggy with anims.
-	'FPS': None                    # Override FPS
-}
+from bpy.props import *    
 
 # NOTE: Keyframes only interpolate between individual keys, i.e. values don't
 #       interpolate across the entire animation.
@@ -66,40 +66,110 @@ TRACKS_TPL = """
 
 # END TEMPLATES
 
+def initSceneProperties(scn):
+	bpy.types.Scene.cssexportanimtrackonly = BoolProperty(
+	    name="Only Export Animation Track",
+	    description="Only export CSS tracks",
+	    default=False)
+
+	bpy.types.Scene.cssexportanimloop = BoolProperty(
+	    name="Loop Animation",
+	    description="Loop Animation",
+	    default=True)
+
+	bpy.types.Scene.cssexportbakeanim = BoolProperty(
+	    name="Bake Animation",
+	    description="Sample animation each frame (interpolation will be forced to linear)",
+	    default=True)
+
+	bpy.types.Scene.cssexport3d = BoolProperty(
+	    name="Export 3D",
+	    description="Incorporates Z axis and camera perspective",
+	    default=False)
+
+	bpy.types.Scene.cssexportswitchaxis = BoolProperty(
+	    name="Switch Axis",
+	    description="Switch Z and Y axes (useful if incoporating simulated physics)",
+	    default=False)
+
+	bpy.types.Scene.cssexportcollapsetransforms = BoolProperty(
+	    name="Collapse Transforms",
+	    description="Use world space transforms instead of relying on parent-child transforms. Buggy with anims.",
+	    default=False)
+
+	bpy.types.Scene.cssexportanimfps = IntProperty(
+	    name="Override FPS",
+	    description="Override FPS",
+	    default=0)
+
+	bpy.types.Scene.cssexportglobalscale = FloatProperty(
+    name="Global Scale",
+    description="Global Scale",
+    default=1.0)
+
+initSceneProperties(bpy.context.scene)
+
+bpy.context.scene.cssexportcollapsetransforms = False
+bpy.context.scene.cssexport3d = False
+bpy.context.scene.cssexportswitchaxis = False
+
+
+# Export action
+
+
+
+class ExportCSSData(bpy.types.Operator):
+    global exportmessage
+    bl_idname = "export_scene.css_html"
+    bl_label = "Export CSS Transform"
+    __doc__ = """Exports scene to a CSS Transform animation"""
+
+    # List of operator properties, the attributes will be assigned
+    # to the class instance from the operator settings before calling.
+
+    filepath = StringProperty(
+            subtype='FILE_PATH',
+            )
+    filter_glob = StringProperty(
+            default="*.html",
+            options={'HIDDEN'},
+            )
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object != None
+
+    def execute(self, context):
+        doExport(self.filepath, context)
+        
+        return {'FINISHED'}
+        
+    def invoke(self, context, event):
+        wm = context.window_manager
+        wm.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
 # Lookups
 
 InterpolationLookup = {
-	Blender.IpoCurve.InterpTypes.CONST:"linear",
-	Blender.IpoCurve.InterpTypes.LINEAR:"linear",
-	Blender.IpoCurve.InterpTypes.BEZIER:"bezier"
+	'CONSTANT' : 'linear',
+	'LINEAR': 'linear',
+	'BEZIER': 'bezier'
 }
 
 # Util
 
 import os.path
 
-# Gets the Base Name from the File Path
-def basename(filepath):
-	if "\\" in filepath:
-		words = string.split(filepath, "\\")
-	else:
-		words = string.split(filepath, "/")
-	words = string.split(words[-1], ".")
-	return string.join(words[0:len(words)], ".")
  
 # Gets base path with trailing /
 def basepath(filepath):
 	if "\\" in filepath: sep = "\\"
 	else: sep = "/"
-	words = string.split(filepath, sep)
+	words = filepath.split(sep)
 	# join drops last word (file name)
-	return string.join(words[:-1], sep)
- 
-# Gets the Base Name & path from the File Path
-def noext(filepath):
-	words = string.split(filepath, ".")
-	if len(words)==1: return filepath
-	return string.join(words[:-1], ".")
+	return sep.join(words[:-1])
 
 class Bitfield:
 	INT_WIDTH=32
@@ -110,13 +180,13 @@ class Bitfield:
 	
 	def __setitem__(self, position, value):
 		if value:
-			self.field[position / Bitfield.INT_WIDTH] |= 1 << (position % Bitfield.INT_WIDTH)
-		elif self.field[position / Bitfield.INT_WIDTH] & 1 << (position % Bitfield.INT_WIDTH) > 0:
-			self.field[position / Bitfield.INT_WIDTH] ^= 1 << (position % Bitfield.INT_WIDTH)
+			self.field[int(position) // Bitfield.INT_WIDTH] |= 1 << (int(position) % Bitfield.INT_WIDTH)
+		elif self.field[int(position) // Bitfield.INT_WIDTH] & 1 << (int(position) % Bitfield.INT_WIDTH) > 0:
+			self.field[int(position) // Bitfield.INT_WIDTH] ^= 1 << (int(position) % Bitfield.INT_WIDTH)
 	
 	def __getitem__(self, position):
 		try:
-			if self.field[position / Bitfield.INT_WIDTH] & 1 << (position % Bitfield.INT_WIDTH) > 0:
+			if self.field[int(position) // Bitfield.INT_WIDTH] & 1 << (int(position) % Bitfield.INT_WIDTH) > 0:
 				return 1
 			else:
 				return 0
@@ -219,12 +289,12 @@ class SimpleTransform:
 			self.matters |= SimpleTransform.MATTERS_SCLZ
 			self.scl[2] = z
 	
-	def transformValue(self):
+	def transformValue(self, threedee=False):
 		string = ""
 		list = []
 		
 		# Location
-		if CONFIG["EXPORT_3D"] and self.matters & SimpleTransform.MATTERS_LOC3D == SimpleTransform.MATTERS_LOC3D:
+		if threedee and self.matters & SimpleTransform.MATTERS_LOC3D == SimpleTransform.MATTERS_LOC3D:
 			list.append("translate3d(%fpx, %fpx, %fpx)" % (self.loc[0], self.loc[1], self.loc[2]))
 		elif self.matters & SimpleTransform.MATTERS_LOC2D == SimpleTransform.MATTERS_LOC2D:
 			list.append("translate(%fpx, %fpx)" % (self.loc[0], self.loc[1]))
@@ -233,24 +303,24 @@ class SimpleTransform:
 				list.append("translateX(%fpx)" % self.loc[0])
 			if self.matters & SimpleTransform.MATTERS_LOCY:
 				list.append("translateY(%fpx)" % self.loc[1])
-			if CONFIG["EXPORT_3D"] and self.matters & SimpleTransform.MATTERS_LOCZ:
+			if threedee and self.matters & SimpleTransform.MATTERS_LOCZ:
 				list.append("translateZ(%fpx)" % self.loc[2])
 		
 		# Rotation
 		# TODO: rotate3d()
-		if CONFIG["EXPORT_3D"]:
+		if threedee:
 			if self.matters & SimpleTransform.MATTERS_ROTX:
-				list.append("rotateX(%fdeg)" % -self.rot[0])
+				list.append("rotateX(%frad)" % -self.rot[0])
 			if self.matters & SimpleTransform.MATTERS_ROTY:
-				list.append("rotateY(%fdeg)" % -self.rot[1])
+				list.append("rotateY(%frad)" % -self.rot[1])
 			if self.matters & SimpleTransform.MATTERS_ROTZ:
-				list.append("rotateZ(%fdeg)" % -self.rot[2])
+				list.append("rotateZ(%frad)" % -self.rot[2])
 		else:
 			if self.matters & SimpleTransform.MATTERS_ROTZ:
-				list.append("rotate(%fdeg)" % -self.rot[2])
+				list.append("rotate(%frad)" % -self.rot[2])
 		
 		# Scale
-		if CONFIG["EXPORT_3D"] and self.matters & SimpleTransform.MATTERS_SCL3D == SimpleTransform.MATTERS_SCL3D:
+		if threedee and self.matters & SimpleTransform.MATTERS_SCL3D == SimpleTransform.MATTERS_SCL3D:
 			list.append("scale3d(%f, %f, %f)" % (self.scl[0], self.scl[1], self.scl[2]))
 		elif self.matters & SimpleTransform.MATTERS_SCL2D == SimpleTransform.MATTERS_SCL2D:
 			list.append("scale(%f, %f)" % (self.scl[0], self.scl[1]))
@@ -259,7 +329,7 @@ class SimpleTransform:
 				list.append("scaleX(%f)" % self.scl[0])
 			if self.matters & SimpleTransform.MATTERS_SCLY:
 				list.append("scaleY(%f)" % self.scl[1])
-			if CONFIG["EXPORT_3D"] and self.matters & SimpleTransform.MATTERS_SCLZ:
+			if threedee and self.matters & SimpleTransform.MATTERS_SCLZ:
 				list.append("scaleZ(%f)" % self.scl[2])
 		
 		return " ".join(list)
@@ -268,7 +338,7 @@ def scaleVA(arr, scale):
 	return [x*scale for x in arr]
 	
 class SimpleObject:
-	def __init__(self, obj):
+	def __init__(self, obj, scene):
 		self.name = obj.name.replace(".", "__")
 		self.obj = obj
 		self.parent = None
@@ -276,36 +346,44 @@ class SimpleObject:
 		self.anim = None
 		self.material = None
 		self.transformOrigin = None
+		self.scene = scene
 		
-		self.mesh = obj.getData(mesh=1)
+		if obj.type == 'MESH':
+			self.mesh = obj.data
+		else:
+			self.mesh = None
+
 		if self.mesh != None:
-			mat_list = self.mesh.materials
+			mat_list = obj.material_slots
 			if len(mat_list) > 0:
-				self.material = mat_list[0]
+				self.material = mat_list[0].material
 		
 	def importIpo(self, ipo):
 		anim = SimpleAnim(self)
-		anim.grabAllFrameTimes()
+		anim.grabAllFrameTimes(ipo)
 		self.anim = anim
 		return anim
 	
 	def blenderChildren(self):
-		return [obj for obj in Blender.Object.Get() if obj.parent == self.obj ]
+		return [obj for obj in self.scene.objects if obj.parent == self.obj ]
 	
 	def getTransform(self):
-		mat = self.obj.getMatrix("localspace")
+		mat = self.obj.matrix_local
 		# Handle collapsed transforms
-		if CONFIG["COLLAPSE_TRANSFORMS"]:
-			mat = self.obj.getMatrix("worldspace")
+		if self.scene.cssexportcollapsetransforms:
+			mat = self.obj.matrix_world
 			#mat = parentMat * mat
 		
-		loc = scaleVA(mat.translationPart(), SimpleTransform.GLOBAL_SCALE)
-		rot = mat.rotationPart().toEuler()
-		scl = mat.scalePart()
+		loc = scaleVA(mat.to_translation(), SimpleTransform.GLOBAL_SCALE)
+		rot = mat.to_euler()
+		scl = mat.to_scale()
 		
 		trans = SimpleTransform()
-		
-		if CONFIG["SWITCH_AXIS"]:
+
+		#print("[%i] %s getLocation: %f %f %f" % (bpy.context.scene.frame_current, self.obj.name, loc[0], -loc[1], loc[2]))
+		#print("[%i] %s getRotation: %f %f %f" % (bpy.context.scene.frame_current, self.obj.name, rot[0], rot[1], rot[2]))
+
+		if self.scene.cssexportswitchaxis:
 			trans.setLocation(loc[0], -loc[2], loc[1])
 			trans.setRotation(rot[0], rot[2], rot[1])
 			trans.setScale(scl[0], scl[2], scl[1])
@@ -318,14 +396,21 @@ class SimpleObject:
 	
 	def getUVBounds(self):
 		msh = self.mesh
-		if msh != None and msh.faceUV:
+
+		mshuv = None
+		for uv in msh.uv_textures:
+			if uv.active:
+				mshuv = uv.data
+				break
+
+		if msh != None and mshuv:
 			minp = [10e30,10e30]
 			maxp = [-10e30,-10e30]
 			
 			uvcoords = []
-			for f in msh.faces:
+			for f in mshuv:
 				for uv in f.uv:
-					uvcoords.append(uv)
+					uvcoords.append(tuple(uv))
 			for pos in uvcoords:
 				for i in range(0,2):
 					if pos[i] < minp[i]:
@@ -342,7 +427,7 @@ class SimpleObject:
 			minp = [10e30,10e30,10e30]
 			maxp = [-10e30,-10e30,-10e30]
 			
-			for v in msh.verts:
+			for v in msh.vertices:
 				pos = v.co
 				for i in range(0,3):
 					if pos[i] < minp[i]:
@@ -351,7 +436,7 @@ class SimpleObject:
 						maxp[i] = pos[i]
 			return scaleVA(minp, SimpleTransform.GLOBAL_SCALE), scaleVA(maxp, SimpleTransform.GLOBAL_SCALE)
 
-		box = obj.getBoundBox()
+		box = obj.bound_box
 		return scaleVA(min(box), SimpleTransform.GLOBAL_SCALE), scaleVA(max(box), SimpleTransform.GLOBAL_SCALE)
 	
 	def getWorldCenter(self):
@@ -369,6 +454,7 @@ class SimpleAnim:
 		self.object = obj
 		self.identifier = obj.name + '-anim'
 		self.matters = None
+		self.interpolation = None
 		self.animates_layer = False
 		self.frames = None # generated frames
 		self.propertyInterpolation = {}
@@ -381,13 +467,10 @@ class SimpleAnim:
 		return False
 	
 	def setPropertyInterpolationTypes(self):
-		ipo = self.object.obj.ipo
-		try:
-			curve = ipo[Blender.Ipo.OB_LOCX]
-		except:
-			curve = None
-		if curve != None:
-			self.propertyInterpolation["TRANSFORM"] = curve.interpolation
+		for interpolation in self.interpolation:
+			if interpolation != None:
+				self.propertyInterpolation["TRANSFORM"] = interpolation
+				break
 	
 	def combineFrom(self, other):
 		#print "COMBINING %s with %s" % (self.identifier, other.identifier)
@@ -406,42 +489,37 @@ class SimpleAnim:
 			if not key in self.propertyInterpolation.keys():
 				self.propertyInterpolation[key] = other.propertyInterpolation[key]
 	
-	def grabAllFrameTimes(self):
-		ipo = self.object.obj.ipo
+	def grabAllFrameTimes(self, ipo):
 		frames = {}
 		
-		checkList = [Blender.Ipo.OB_LOCX, Blender.Ipo.OB_LOCY, Blender.Ipo.OB_LOCZ,
-		             Blender.Ipo.OB_SCALEX, Blender.Ipo.OB_SCALEY, Blender.Ipo.OB_SCALEZ,
-		             Blender.Ipo.OB_ROTX, Blender.Ipo.OB_ROTY, Blender.Ipo.OB_ROTZ,
-		             Blender.Ipo.OB_LAYER]
-		# TODO: incorporate ipo from linked material
-		
-		#print "ANIM: %s" % self.identifier
+		checkList = ['location', 'scale', 'rotation_euler', 'layer']
+
+		#print("ANIM: %s" % ipo.name)
 		curveFrameList = []
-		for curve in checkList:
-			try:
-				cobj = ipo[curve]
-				if curve == Blender.Ipo.OB_LAYER:
-					self.animates_layer = True
-			except:
-				continue
-			curveFrames = self.getFrameTimes(ipo[curve])
+		for fcurve in ipo.fcurves:
+			# Determine frame times for this curve
+			curveFrames = self.getFrameTimes(fcurve)
 			if curveFrames != None:
+				print("CURVEFRAMELIST: %i, start=%i, end=%i" % (len(curveFrames['frames']), curveFrames['start'], curveFrames['end']))
 				curveFrameList.append(curveFrames)
 		
 		# Combine all
-		earliest, latest = self.getFrameTimeBounds(curveFrameList)  # e.g. 1, 2
-		numFrames = ((latest+1) - earliest) # e.g. 1, 2 == 2
+		earliest, latest = tuple(ipo.frame_range)  # e.g. 1, 2
+		numFrames = int(((latest+1) - earliest)) # e.g. 1, 2 == 2
+
+		#print("NUMBER OF FRAMES = %i, START == %i" % (numFrames, earliest))
 		
 		for frameList in curveFrameList:
 			self.combineFrameTimes(frameList, earliest, latest, frames)
 		
-		framesList = frames.values()
-		framesList.sort(lambda a,b:cmp(a[0], b[0]))
+		framesList = list(frames.values())
+		framesList = sorted(framesList, key=lambda a:a[0])
 		
 		self.matters = Bitfield(latest+1)
+		self.interpolation = list(map(lambda x:None, range(int(latest)+1)))
 		for frame in framesList:
 			self.matters[frame[0]] = 1 # NOTE: frame 0 will be ignored
+			self.interpolation[frame[0]] = frame[1]
 		
 		#print "\tSTART=%i,END=%d,LEN=%d" % (earliest, latest, numFrames)
 		self.start = earliest    # e.g. 1
@@ -454,14 +532,14 @@ class SimpleAnim:
 			percent = float(frame[0]-startFrame) / fl  # e.g. 1-1 / 2-1 == 0; 2-1 / 2-1 == 1.0
 			key = ("%2.2f" % (percent*100)) + "%"
 			if not key in outList:
-				outList[key] = [int(frame[0]), None]
+				outList[key] = [int(frame[0]), frame[2]]
 	
 	def getFrameTimes(self, curve):
 		if curve == None:
 			return None
 		
-		fr = map(lambda f: [f.pt[0], curve[f.pt[0]]], curve.bezierPoints)
-		num = fr[-1][0] - fr[0][0]
+		# time, value
+		fr = list(map(lambda f: [f.co[0], f.co[1], f.interpolation], curve.keyframe_points))
 		return {"frames":fr, 
 				"start": fr[0][0],
 				"end": fr[-1][0]}
@@ -479,23 +557,22 @@ class SimpleAnim:
 			
 		return earliest, latest
 
-def importObjects(list, out_list, anims_list, parent=None):
-	for obj in list:
-		obj_parent = obj.getParent()
+def importObjects(olist, out_list, anims_list, scene, parent=None):
+	for obj in olist:
+		#print("IMPORTING OBJECT: %s %s" % (obj.name, obj.type))
+		obj_parent = obj.parent
 		if (parent == None and obj_parent != None) or (parent != None and obj_parent != parent.obj):
 			continue
 		
-		if obj.getType() != "Mesh" and obj.getType() != "Empty":
+		if obj.type != "MESH" and obj.type != "EMPTY":
 			continue
 		
-		print obj.name
+		ipo = obj.animation_data
+		built_object = SimpleObject(obj, scene)
 		
-		ipo = obj.getIpo()
-		built_object = SimpleObject(obj)
-		
-		if ipo != None and ipo.getNcurves() > 0:
-			print "Importing curve for %s" % obj.getName()
-			anims_list.append(built_object.importIpo(ipo))
+		if ipo != None and ipo.action != None and len(ipo.action.fcurves) != 0:
+			#print("Importing curve for %s" % obj.name)
+			anims_list.append(built_object.importIpo(ipo.action))
 		
 		# Insert into correct list
 		if parent != None:
@@ -505,7 +582,7 @@ def importObjects(list, out_list, anims_list, parent=None):
 			out_list.append(built_object)
 		
 		# Recurse
-		importObjects(built_object.blenderChildren(), out_list, anims_list, built_object)
+		importObjects(built_object.blenderChildren(), out_list, anims_list, scene, built_object)
 
 def halfOf(p1, p2):
 	x = (p2[0] - p1[0]) * 0.5
@@ -513,8 +590,16 @@ def halfOf(p1, p2):
 	z = (p2[2] - p1[2]) * 0.5
 	return [x, y, z]
 	
-def exportObjects(list, doc, style):
-	for obj in list:
+def exportObjects(olist, doc, style, scene):
+	threedee = scene.cssexport3d
+	fps = None
+	if scene.cssexportanimfps == 0.0:
+		fps = scene.render.fps
+	else:
+		fps = scene.cssexportanimfps
+
+	for obj in olist:
+		#print("EXPORTING OBJECT %s" % obj.obj.name)
 		# Actual div
 		doc.append("<div id=\"%s\">" % obj.name)
 		
@@ -554,7 +639,7 @@ def exportObjects(list, doc, style):
 		
 		#print "%s actual center=%s" % (obj.obj.getName(), str(obj.center))
 		
-		if not CONFIG["COLLAPSE_TRANSFORMS"] and obj.parent != None:
+		if not scene.cssexportcollapsetransforms and obj.parent != None:
 			wc = obj.getWorldCenter()
 			wc[0] -= obj.center[0]
 			wc[1] -= obj.center[1]
@@ -565,8 +650,8 @@ def exportObjects(list, doc, style):
 		#
 		#print "%s center=%s" % (obj.obj.getName(), str(obj.center))
 		
-		style.append("-webkit-transform: %s;\n" % obj.getTransform().transformValue())
-		style.append("-moz-transform: %s;\n" % obj.getTransform().transformValue())
+		style.append("-webkit-transform: %s;\n" % obj.getTransform().transformValue(threedee))
+		style.append("-moz-transform: %s;\n" % obj.getTransform().transformValue(threedee))
 		
 		if obj.mesh != None:
 			style.append("width: %dpx;\n" % (maxb[0] - minb[0]))
@@ -577,31 +662,31 @@ def exportObjects(list, doc, style):
 			style.append("-webkit-transform-origin: %dpx %dpx;\n" % (obj.transformOrigin[0], obj.transformOrigin[1]))
 			style.append("-moz-transform-origin: %dpx %dpx;\n" % (obj.transformOrigin[0], obj.transformOrigin[1]))
 		
-		if CONFIG["EXPORT_3D"]:
+		if scene.cssexport3d:
 			style.append("-webkit-transform-style: preserve-3d;\n")
 		
 		# color, texture, etc
 		if obj.material != None:
 			# 
 			mat = obj.material
-			if not mat.mode & Blender.Material.Modes.TEXFACE:
+			if not obj.material.transparency_method == 'Z_TRANSPARENCY':
 				# color
-				style.append("background-color: rgb(%d,%d,%d);\n" % (mat.R * 255, mat.G * 255, mat.B * 255))
+				style.append("background-color: rgb(%d,%d,%d);\n" % (mat.diffuse_color[0] * 255, mat.diffuse_color[1] * 255, mat.diffuse_color[2] * 255))
 				
 			if mat.alpha < 1.0:
 				style.append("opacity: %f;\n" % mat.alpha)
 			
 			# Use first texture slot to determine image background
-			texSlot = mat.getTextures()[0]
+			texSlot = mat.texture_slots[0]
 			if texSlot != None:
-				tex = texSlot.tex
-				if tex != None:
+				tex = texSlot.texture
+				if tex != None and tex.type == 'IMAGE':
 					# Dump & save
-					img = tex.getImage()
+					img = tex.image
 					if img != None:
 						# Image file
-						name = img.getFilename()
-						style.append("background-image: url(\"%s.png\");\n" % noext(basename(name)))
+						name = img.filepath
+						style.append("background-image: url(\"%s.png\");\n" % bpy.path.ensure_ext(bpy.path.basename(name), ''))
 						
 						# Background position
 						uv_min, uv_max = obj.getUVBounds()
@@ -612,7 +697,7 @@ def exportObjects(list, doc, style):
 						         uv_max[1] - uv_min[1]]
 						
 						# Calculate difference in image scale
-						sz = img.getSize()
+						sz = img.size
 						oWidth = sz[0] / (maxb[0] - minb[0])
 						oHeight = sz[1] / (maxb[1] - minb[1])
 						
@@ -627,31 +712,31 @@ def exportObjects(list, doc, style):
 		if obj.anim != None:
 			anim = obj.anim
 			
-			duration = anim.len / CONFIG["FPS"]
-			delay = (anim.start-1) / CONFIG["FPS"]
+			duration = anim.len / fps
+			delay = (anim.start-1) / fps
 			
 			style.append("-webkit-animation-name: %s;\n" % anim.identifier)
 			style.append("-webkit-animation-duration: %fs;\n" % duration)
 			style.append("-webkit-animation-delay: %fs;\n" % delay)
 			
-			if CONFIG["ANIM_LOOP"]:
+			if scene.cssexportanimloop:
 				style.append("-webkit-animation-iteration-count: infinite;\n")
-			if CONFIG["ANIM_BAKE"]:
+			if scene.cssexportbakeanim:
 				style.append("-webkit-animation-timing-function: linear;\n")
 			
 		style.append("}\n")
 		
 		# Children are part of element
-		if not CONFIG["COLLAPSE_TRANSFORMS"]:
-			exportObjects(obj.children, doc, style)
+		if not scene.cssexportcollapsetransforms:
+			exportObjects(obj.children, doc, style, scene)
 		
 		doc.append("</div>\n")
 		
 		# Children are part of root
-		if CONFIG["COLLAPSE_TRANSFORMS"]:
-			exportObjects(obj.children, doc, style)
+		if scene.cssexportcollapsetransforms:
+			exportObjects(obj.children, doc, style, scene)
 
-def exportWebkit(objects, anims):
+def exportWebkit(objects, anims, scene, filename):
 	# Second step: output webkit stuff
 	doc = []
 	style = ["#root div {position: absolute;}\n",
@@ -659,17 +744,17 @@ def exportWebkit(objects, anims):
 	
 	# 3D Needs to have a perspective and origin
 	# TODO: some form of logical calculation using a camera
-	if CONFIG["EXPORT_3D"]:
+	if scene.cssexport3d:
 		style.append("-webkit-perspective: %i; " % (70))
 		style.append("-webkit-perspective-origin: center 240px;")
 	style.append("}\n")
 	
-	exportObjects(objects, doc, style)
+	exportObjects(objects, doc, style, scene)
 	
-	className = noext(basename(Blender.Get("filename")))
-	classPath = basepath(Blender.Get("filename"))
-	animName = "%s-%s" % (className, Blender.Scene.GetCurrent().getName()) 
-	doBake = CONFIG["ANIM_BAKE"]
+	className = bpy.path.ensure_ext(bpy.path.basename(filename), '')
+	classPath = basepath(str(filename))
+	animName = "%s-%s" % (className, scene.name) 
+	doBake = scene.cssexportbakeanim
 	
 	tracks = []
 	# Animation keyframes
@@ -687,7 +772,7 @@ def exportWebkit(objects, anims):
 			fid = ("%2.2f" % (percent*100)) + "%"
 			
 			tracks.append("%s {\n" % fid)
-			tracks.append("-webkit-transform: %s;\n" % frame[1].transformValue())
+			tracks.append("-webkit-transform: %s;\n" % frame[1].transformValue(scene.cssexport3d))
 			if anim.animates_layer:
 				if frame[3]:
 					tracks.append("visibility: hidden;\n")
@@ -708,7 +793,7 @@ def exportWebkit(objects, anims):
 	fs.close()
 	
 	# Dump to document
-	if not CONFIG["ANIM_TRACK_ONLY"]:
+	if not scene.cssexportanimtrackonly:
 		fs = open("%s/%s.html" % (classPath, className), "w")
 		fs.write(WEBKIT_TPL % substitutions)
 		fs.close()
@@ -726,24 +811,23 @@ def recursiveAnimClone(obj, new_anims):
 	for child in obj.children:
 		recursiveAnimClone(child, new_anims)
 
-def process():
-	scene = Blender.Scene.GetCurrent()
-	timeLine = scene.getTimeLine()
+def doExport(filePath, context):
+	scene = context.scene
 	
-	ctx = scene.getRenderingContext()
-	if CONFIG["FPS"] == None:
-		CONFIG["FPS"] = ctx.fps
+	ctx = scene.render
 	
 	objects = []
 	anims = []
+
+	SimpleTransform.GLOBAL_SCALE = scene.cssexportglobalscale
 	
-	Blender.Set("curframe", 1)
+	scene.frame_set(1)
 	
 	# Import objects and frame times
-	importObjects(scene.objects, objects, anims)
+	importObjects(scene.objects, objects, anims, scene)
 	
 	# Collapse transforms if neccesary
-	if CONFIG["COLLAPSE_TRANSFORMS"]:
+	if scene.cssexportcollapsetransforms:
 		new_anims = []
 		for anim in anims:
 			recursiveAnimClone(anim.object, new_anims)
@@ -753,11 +837,12 @@ def process():
 	for anim in anims:
 		anim.frames = []
 	
-	doBake = CONFIG["ANIM_BAKE"]
+	doBake = scene.cssexportbakeanim
 	
 	# Grab frames for all anims
-	for fid in range(ctx.sFrame, ctx.eFrame):
-		Blender.Set("curframe", fid)
+	for fid in range(scene.frame_start, scene.frame_end):
+		scene.frame_set(fid)
+		scene.update()
 		
 		for anim in anims:
 			if anim.matters[fid] or (doBake and anim.encompassesFrame(fid)):
@@ -773,45 +858,19 @@ def process():
 				layer_20 = 20 in anim.object.obj.layers
 				anim.frames.append([fid, anim.object.getTransform(), interpolation, layer_20])
 	
-	exportWebkit(objects, anims)
-	
-	# Reset FPS
-	CONFIG["FPS"] = None
+	exportWebkit(objects, anims, scene, filePath)
 
-def event(evt, val):
-	if evt == Draw.ESCKEY:
-		Draw.Exit()
+def menu_func(self, context):
+    default_path = os.path.splitext(bpy.data.filepath)[0] + ".html"
+    self.layout.operator(ExportCSSData.bl_idname, text="Export CSS Transform (.html)").filepath = default_path
 
-export_button = None
-threedee_button = None
-trackonly_button = None
-		
-def doExport(evt, val):
-	return process()
+def register():
+    bpy.utils.register_module(__name__)
+    bpy.types.INFO_MT_file_export.append(menu_func)
 
-def doToggle3D(evt, val):
-	CONFIG["EXPORT_3D"] = val
+def unregister():
+    bpy.utils.unregister_module(__name__)
+    bpy.types.INFO_MT_file_export.remove(menu_func)
 
-def doToggleLoop(evt, val):
-	CONFIG["ANIM_LOOP"] = val
-
-def doToggleTrack(evt, val):
-	CONFIG["ANIM_TRACK_ONLY"] = val
-
-def doUpdateScale(evt, val):
-	SimpleTransform.GLOBAL_SCALE = val
-
-def gui():
-	desc = Draw.Label("Webkit Exporter", 10, 194, 300, 20)
-	descAuthor = Draw.Label("(C)2009 James S Urquhart. Refer to the LICENSE file for details.", 10, 180, 500, 20)
-	descGeom = Draw.Label("Geometry", 10, 140, 200, 20)
-	descAnim = Draw.Label("Animation", 10, 80, 200, 20)
-	
-	export_button = Draw.PushButton("Export", 1, 10, 10, 100, 24, "Export", doExport)
-	threedee_button = Draw.Toggle("3D", 2, 10, 110, 40, 24, CONFIG["EXPORT_3D"], "3D", doToggle3D)
-	loop_button = Draw.Toggle("Loop", 5, 10, 50, 40, 24, CONFIG["ANIM_LOOP"], "Loop animation track", doToggleLoop)
-	scale_button = Draw.Number('Scale: ', 1000, 60, 110, 120, 24, SimpleTransform.GLOBAL_SCALE, 0.0,10.0, 'Global scale', doUpdateScale, 0.1, 2)
-	trackonly_button = Draw.Toggle("Track Only", 2, 60, 50, 80, 24, CONFIG["ANIM_TRACK_ONLY"], "Track Only", doToggleTrack)
-	
 if __name__ == "__main__":
-	Draw.Register(gui, event, None)
+    register()
