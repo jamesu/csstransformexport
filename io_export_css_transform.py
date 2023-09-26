@@ -207,6 +207,8 @@ class SimpleTransform:
     
     MATTERS_SCL2D = MATTERS_SCLX | MATTERS_SCLY
     MATTERS_SCL3D = MATTERS_SCLX | MATTERS_SCLY | MATTERS_SCLZ
+
+    MATTERS_VIS=1<<9
     
     # Global scaling
     GLOBAL_SCALE = 10.0
@@ -216,6 +218,7 @@ class SimpleTransform:
         self.loc = [0,0,0]
         self.rot = [0,0,0]
         self.scl = [0,0,0]
+        self.vis = True
         
         self.is3D = False
     
@@ -251,6 +254,11 @@ class SimpleTransform:
         if z != None and z != self.scl[2]:
             self.matters |= SimpleTransform.MATTERS_SCLZ
             self.scl[2] = z
+
+    def setVis(self, vis):
+        if self.vis != vis:
+          self.matters |= SimpleTransform.MATTERS_VIS
+        self.vis = vis
     
     def transformValue(self, threedee=False):
         string = ""
@@ -301,7 +309,7 @@ def scaleVA(arr, scale):
     return [x*scale for x in arr]
     
 class SimpleObject:
-    def __init__(self, obj, scene):
+    def __init__(self, obj, scene, op):
         self.name = obj.name.replace(".", "__")
         self.obj = obj
         self.parent = None
@@ -310,6 +318,7 @@ class SimpleObject:
         self.material = None
         self.transformOrigin = None
         self.scene = scene
+        self.op = op
         
         if obj.type == 'MESH':
             self.mesh = obj.data
@@ -322,7 +331,7 @@ class SimpleObject:
                 self.material = mat_list[0].material
         
     def importIpo(self, ipo):
-        anim = SimpleAnim(self)
+        anim = SimpleAnim(self, self.op)
         anim.grabAllFrameTimes(ipo)
         self.anim = anim
         return anim
@@ -343,8 +352,8 @@ class SimpleObject:
         
         trans = SimpleTransform()
 
-        #print("[%i] %s getLocation: %f %f %f" % (bpy.context.scene.frame_current, self.obj.name, loc[0], -loc[1], loc[2]))
-        #print("[%i] %s getRotation: %f %f %f" % (bpy.context.scene.frame_current, self.obj.name, rot[0], rot[1], rot[2]))
+        #self.op.report({'INFO'}, "[%i] %s getLocation: %f %f %f" % (bpy.context.scene.frame_current, self.obj.name, loc[0], -loc[1], loc[2]))
+        #self.op.report({'INFO'}, "[%i] %s getRotation: %f %f %f" % (bpy.context.scene.frame_current, self.obj.name, rot[0], rot[1], rot[2]))
 
         if self.scene.cssexportswitchaxis:
             trans.setLocation(loc[0], -loc[2], loc[1])
@@ -355,6 +364,7 @@ class SimpleObject:
             trans.setRotation(rot[0], rot[1], rot[2])
             trans.setScale(scl[0], scl[1], scl[2])
         
+        trans.setVis(not self.obj.hide_render)
         return trans
     
     def getUVBounds(self):
@@ -413,7 +423,7 @@ class SimpleObject:
         return center
 
 class SimpleAnim:
-    def __init__(self, obj):
+    def __init__(self, obj, op):
         self.object = obj
         self.identifier = obj.name + '-anim'
         self.matters = None
@@ -423,6 +433,8 @@ class SimpleAnim:
         self.propertyInterpolation = {}
         self.start = 0
         self.len = 0
+        self.op = op
+        self.animates_vis = False
     
     def encompassesFrame(self, fid):
         if fid >= self.start and fid < self.start+self.len:
@@ -456,21 +468,25 @@ class SimpleAnim:
         frames = {}
         
         checkList = ['location', 'scale', 'rotation_euler', 'layer']
+        has_hide_render_track = False
 
-        #print("ANIM: %s" % ipo.name)
+        self.op.report({'INFO'}, "ANIM: %s" % ipo.name)
         curveFrameList = []
         for fcurve in ipo.fcurves:
             # Determine frame times for this curve
             curveFrames = self.getFrameTimes(fcurve)
             if curveFrames != None:
-                print("CURVEFRAMELIST: %i, start=%i, end=%i" % (len(curveFrames['frames']), curveFrames['start'], curveFrames['end']))
+                self.op.report({'INFO'}, "CURVEFRAMELIST: %i, start=%i, end=%i" % (len(curveFrames['frames']), curveFrames['start'], curveFrames['end']))
                 curveFrameList.append(curveFrames)
+            if fcurve.data_path == 'hide_render':
+                has_hide_render_track = True
+                break
         
         # Combine all
         earliest, latest = tuple(ipo.frame_range)  # e.g. 1, 2
         numFrames = int(((latest+1) - earliest)) # e.g. 1, 2 == 2
 
-        #print("NUMBER OF FRAMES = %i, START == %i" % (numFrames, earliest))
+        self.op.report({'INFO'}, "NUMBER OF FRAMES = %i, START == %i" % (numFrames, earliest))
         
         for frameList in curveFrameList:
             self.combineFrameTimes(frameList, earliest, latest, frames)
@@ -488,6 +504,7 @@ class SimpleAnim:
         self.start = earliest    # e.g. 1
         self.len = numFrames     # e.g. 2 [1,2]
         self.setPropertyInterpolationTypes()
+        self.animates_vis = has_hide_render_track
     
     def combineFrameTimes(self, frames, startFrame, endFrame, outList):
         fl = endFrame - startFrame
@@ -520,197 +537,12 @@ class SimpleAnim:
             
         return earliest, latest
 
-def importObjects(olist, out_list, anims_list, scene, parent=None):
-    for obj in olist:
-        #print("IMPORTING OBJECT: %s %s" % (obj.name, obj.type))
-        obj_parent = obj.parent
-        if (parent == None and obj_parent != None) or (parent != None and obj_parent != parent.obj):
-            continue
-        
-        if obj.type != "MESH" and obj.type != "EMPTY":
-            continue
-        
-        ipo = obj.animation_data
-        built_object = SimpleObject(obj, scene)
-        
-        if ipo != None and ipo.action != None and len(ipo.action.fcurves) != 0:
-            #print("Importing curve for %s" % obj.name)
-            anims_list.append(built_object.importIpo(ipo.action))
-        
-        # Insert into correct list
-        if parent != None:
-            built_object.parent = parent
-            parent.children.append(built_object)
-        else:
-            out_list.append(built_object)
-        
-        # Recurse
-        importObjects(built_object.blenderChildren(), out_list, anims_list, scene, built_object)
-
 def halfOf(p1, p2):
     x = (p2[0] - p1[0]) * 0.5
     y = (p2[1] - p1[1]) * 0.5
     z = (p2[2] - p1[2]) * 0.5
     return [x, y, z]
     
-def exportObjects(olist, doc, style, scene):
-    threedee = scene.cssexport3d
-    fps = None
-    if scene.cssexportanimfps == 0.0:
-        fps = scene.render.fps
-    else:
-        fps = scene.cssexportanimfps
-
-    for obj in olist:
-        #print("EXPORTING OBJECT %s" % obj.obj.name)
-        # Actual div
-        doc.append("<div id=\"%s\">" % obj.name)
-        
-        # CSS
-        style.append("#%s {\n" % obj.name)
-        
-        if obj.mesh != None:
-            minb, maxb = obj.getBounds()
-            
-            # Problem: we need to fix the origin of the HTML element. 
-            #          -transform-origin only works for rotation and scaling.
-            # Solution:
-            #          use left and top to offset element center instead,
-            #          taking into account the origin is by default at the center
-            # e.g. bound size = 64,64
-            #      bound origin = 0,0
-            #      webkit origin = 32,32
-            #      left, top = -32, -32  (i.e. bound origin - webkit origin)
-            halfSize = halfOf(minb, maxb)
-            
-            boundOrigin = [
-            halfSize[0] + minb[0],
-            halfSize[1] + minb[1],
-            halfSize[2] + minb[2]]
-            
-            boundOrigin[1] = -boundOrigin[1] # scene is -y
-            
-            obj.center = [
-            boundOrigin[0] - halfSize[0],
-            boundOrigin[1] - halfSize[1],
-            boundOrigin[2] - halfSize[2]]
-            
-            # transformOrigin to correct rotation and scaling
-            obj.transformOrigin = [-obj.center[0], -obj.center[1]]
-        else:
-            obj.center = [0,0,0]
-        
-        #print "%s actual center=%s" % (obj.obj.getName(), str(obj.center))
-        
-        if not scene.cssexportcollapsetransforms and obj.parent != None:
-            wc = obj.getWorldCenter()
-            wc[0] -= obj.center[0]
-            wc[1] -= obj.center[1]
-            
-            # Center needs to be expressed in parents coordinate system
-            obj.center[0] = obj.center[0] - wc[0]
-            obj.center[1] = obj.center[1] - wc[1]
-        #
-        #print "%s center=%s" % (obj.obj.getName(), str(obj.center))
-        
-        style.append("transform: %s;\n" % obj.getTransform().transformValue(threedee))
-        
-        if obj.mesh != None:
-            style.append("width: %dpx;\n" % (maxb[0] - minb[0]))
-            style.append("height: %dpx;\n" % (maxb[1] - minb[1]))
-        style.append("left: %dpx;\n" % (obj.center[0]))
-        style.append("top: %dpx;\n" % (obj.center[1]))
-        if obj.transformOrigin != None:
-            style.append("transform-origin: %dpx %dpx;\n" % (obj.transformOrigin[0], obj.transformOrigin[1]))
-        
-        if scene.cssexport3d:
-            style.append("transform-style: preserve-3d;\n")
-        
-        # color, texture, etc
-        if obj.material != None:
-            # 
-            mat = obj.material
-            if not obj.material.transparency_method == 'Z_TRANSPARENCY':
-                # color
-                style.append("background-color: rgb(%d,%d,%d);\n" % (mat.diffuse_color[0] * 255, mat.diffuse_color[1] * 255, mat.diffuse_color[2] * 255))
-                
-            if mat.alpha < 1.0:
-                style.append("opacity: %f;\n" % mat.alpha)
-            
-            # Use first texture slot to determine image background
-            texSlot = mat.texture_slots[0]
-            if texSlot != None:
-                tex = texSlot.texture
-                if tex != None and tex.type == 'IMAGE':
-                    # Dump & save
-                    img = tex.image
-                    if img != None:
-                        # Image file
-                        name = img.filepath
-                        style.append("background-image: url(\"%s.png\");\n" % bpy.path.ensure_ext(bpy.path.basename(name), ''))
-                        
-                        # Background position
-                        uv_min, uv_max = obj.getUVBounds()
-                        style.append("background-position: %i%% %i%%;\n" % (uv_min[0] * 100, uv_min[1] * 100))
-                        
-                        # Background scaling
-                        scale = [uv_max[0] - uv_min[0], 
-                                 uv_max[1] - uv_min[1]]
-                        
-                        # Calculate difference in image scale
-                        sz = img.size
-                        oWidth = sz[0] / (maxb[0] - minb[0])
-                        oHeight = sz[1] / (maxb[1] - minb[1])
-                        
-                        scale[0] = round(scale[0] * 100, 2)
-                        scale[1] = round(scale[1] * 100, 2)
-                        
-                        if oWidth != 1.0 or oHeight != 1.0:
-                            style.append("background-size: %.2f%% %.2f%%;\n" % (scale[0], scale[1]))
-
-        # animation
-        if obj.anim != None:
-            anim = obj.anim
-            
-            duration = anim.len / fps
-            delay = (anim.start-1) / fps
-            
-            style.append("animation-name: %s;\n" % anim.identifier)
-            style.append("animation-duration: %fs;\n" % duration)
-            style.append("animation-delay: %fs;\n" % delay)
-            
-            if scene.cssexportanimloop:
-                style.append("animation-iteration-count: infinite;\n")
-            if scene.cssexportbakeanim:
-                style.append("animation-timing-function: linear;\n")
-            
-        style.append("}\n")
-        
-        # Children are part of element
-        if not scene.cssexportcollapsetransforms:
-            exportObjects(obj.children, doc, style, scene)
-        
-        doc.append("</div>\n")
-        
-        # Children are part of root
-        if scene.cssexportcollapsetransforms:
-            exportObjects(obj.children, doc, style, scene)
-
-
-# Recursively makes sure child elements have anim tracks (for collapsed transforms)
-def recursiveAnimClone(obj, new_anims):
-    parent = obj.parent
-    if parent != None and parent.anim != None:
-        if obj.anim == None:
-            obj.anim = SimpleAnim(obj)
-            obj.anim.matters = Bitfield(parent.anim.matters.size)
-            new_anims.append(obj.anim)
-        obj.anim.combineFrom(parent.anim)
-    
-    for child in obj.children:
-        recursiveAnimClone(child, new_anims)
-
-
 # Export action
 
 
@@ -752,6 +584,47 @@ class ExportCSSData(bpy.types.Operator):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
+    # Recursively makes sure child elements have anim tracks (for collapsed transforms)
+    def recursiveAnimClone(self, obj, new_anims):
+        parent = obj.parent
+        if parent != None and parent.anim != None:
+            if obj.anim == None:
+                obj.anim = SimpleAnim(obj, self)
+                obj.anim.matters = Bitfield(parent.anim.matters.size)
+                new_anims.append(obj.anim)
+            obj.anim.combineFrom(parent.anim)
+        
+        for child in obj.children:
+            self.recursiveAnimClone(child, new_anims)
+
+    def importObjects(self, olist, out_list, anims_list, scene, parent=None):
+        for obj in olist:
+            self.report({'INFO'}, "IMPORTING OBJECT: %s %s" % (obj.name, obj.type))
+            obj_parent = obj.parent
+            if (parent == None and obj_parent != None) or (parent != None and obj_parent != parent.obj):
+                continue
+            
+            if obj.type != "MESH" and obj.type != "EMPTY":
+                continue
+            
+            ipo = obj.animation_data
+            built_object = SimpleObject(obj, scene, self)
+            
+            if ipo != None and ipo.action != None and len(ipo.action.fcurves) != 0:
+                self.report({'INFO'}, "Importing curve for %s" % obj.name)
+                anims_list.append(built_object.importIpo(ipo.action))
+            
+            # Insert into correct list
+            if parent != None:
+                built_object.parent = parent
+                parent.children.append(built_object)
+            else:
+                out_list.append(built_object)
+            
+            # Recurse
+            self.importObjects(built_object.blenderChildren(), out_list, anims_list, scene, built_object)
+
+
     def doExport(self, filePath, context):
         scene = context.scene
         
@@ -765,13 +638,13 @@ class ExportCSSData(bpy.types.Operator):
         scene.frame_set(1)
         
         # Import objects and frame times
-        importObjects(scene.objects, objects, anims, scene)
+        self.importObjects(scene.objects, objects, anims, scene)
         
         # Collapse transforms if neccesary
         if scene.cssexportcollapsetransforms:
             new_anims = []
             for anim in anims:
-                recursiveAnimClone(anim.object, new_anims)
+                self.recursiveAnimClone(anim.object, new_anims)
             anims += new_anims
         
         # Clear anim frames
@@ -796,8 +669,8 @@ class ExportCSSData(bpy.types.Operator):
                     
                     if doBake:
                         interpolation = "linear"
-                    layer_20 = 20 in anim.object.obj.layers
-                    anim.frames.append([fid, anim.object.getTransform(), interpolation, layer_20])
+
+                    anim.frames.append([fid, anim.object.getTransform(), interpolation])
         
         self.exportCSS(objects, anims, scene, filePath)
     
@@ -814,7 +687,7 @@ class ExportCSSData(bpy.types.Operator):
             style.append("perspective-origin: center 240px;")
         style.append("}\n")
         
-        exportObjects(objects, doc, style, scene)
+        self.exportObjects(objects, doc, style, scene)
 
         self.report({'INFO'}, f"Exporting html to: {filename}")
         
@@ -826,7 +699,7 @@ class ExportCSSData(bpy.types.Operator):
         tracks = []
         # Animation keyframes
         for anim in anims:
-            tracks.append("@-keyframes %s {\n" % anim.identifier)
+            tracks.append("@keyframes %s {\n" % anim.identifier)
             
             earliest = anim.start
             fl = anim.len-1
@@ -840,8 +713,8 @@ class ExportCSSData(bpy.types.Operator):
                 
                 tracks.append("%s {\n" % fid)
                 tracks.append("transform: %s;\n" % frame[1].transformValue(scene.cssexport3d))
-                if anim.animates_layer:
-                    if frame[3]:
+                if anim.animates_vis:
+                    if not frame[1].vis:
                         tracks.append("visibility: hidden;\n")
                     else:
                         tracks.append("visibility: visible;\n")    
@@ -864,6 +737,151 @@ class ExportCSSData(bpy.types.Operator):
             fs = open("%s/%s.html" % (classPath, className), "w")
             fs.write(WEBKIT_TPL % substitutions)
             fs.close()
+
+    def exportObjects(self, olist, doc, style, scene):
+        threedee = scene.cssexport3d
+        fps = None
+        if scene.cssexportanimfps == 0.0:
+            fps = scene.render.fps
+        else:
+            fps = scene.cssexportanimfps
+
+        for obj in olist:
+            self.report({'INFO'}, "EXPORTING OBJECT %s" % obj.obj.name)
+            # Actual div
+            doc.append("<div id=\"%s\">" % obj.name)
+            
+            # CSS
+            style.append("#%s {\n" % obj.name)
+            
+            if obj.mesh != None:
+                minb, maxb = obj.getBounds()
+                
+                # Problem: we need to fix the origin of the HTML element. 
+                #          -transform-origin only works for rotation and scaling.
+                # Solution:
+                #          use left and top to offset element center instead,
+                #          taking into account the origin is by default at the center
+                # e.g. bound size = 64,64
+                #      bound origin = 0,0
+                #      webkit origin = 32,32
+                #      left, top = -32, -32  (i.e. bound origin - webkit origin)
+                halfSize = halfOf(minb, maxb)
+                
+                boundOrigin = [
+                halfSize[0] + minb[0],
+                halfSize[1] + minb[1],
+                halfSize[2] + minb[2]]
+                
+                boundOrigin[1] = -boundOrigin[1] # scene is -y
+                
+                obj.center = [
+                boundOrigin[0] - halfSize[0],
+                boundOrigin[1] - halfSize[1],
+                boundOrigin[2] - halfSize[2]]
+                
+                # transformOrigin to correct rotation and scaling
+                obj.transformOrigin = [-obj.center[0], -obj.center[1]]
+            else:
+                obj.center = [0,0,0]
+            
+            #print "%s actual center=%s" % (obj.obj.getName(), str(obj.center))
+            
+            if not scene.cssexportcollapsetransforms and obj.parent != None:
+                wc = obj.getWorldCenter()
+                wc[0] -= obj.center[0]
+                wc[1] -= obj.center[1]
+                
+                # Center needs to be expressed in parents coordinate system
+                obj.center[0] = obj.center[0] - wc[0]
+                obj.center[1] = obj.center[1] - wc[1]
+            #
+            #print "%s center=%s" % (obj.obj.getName(), str(obj.center))
+            
+            style.append("transform: %s;\n" % obj.getTransform().transformValue(threedee))
+            
+            if obj.mesh != None:
+                style.append("width: %dpx;\n" % (maxb[0] - minb[0]))
+                style.append("height: %dpx;\n" % (maxb[1] - minb[1]))
+            style.append("left: %dpx;\n" % (obj.center[0]))
+            style.append("top: %dpx;\n" % (obj.center[1]))
+            if obj.transformOrigin != None:
+                style.append("transform-origin: %dpx %dpx;\n" % (obj.transformOrigin[0], obj.transformOrigin[1]))
+            
+            if scene.cssexport3d:
+                style.append("transform-style: preserve-3d;\n")
+            
+            # color, texture, etc
+            if obj.material != None:
+                # 
+                mat = obj.material
+                self.report({'INFO'}, obj.material.blend_method)
+
+                if obj.material.blend_method == 'OPAQUE':
+                    # color
+                    style.append("background-color: rgb(%d,%d,%d);\n" % (mat.diffuse_color[0] * 255, mat.diffuse_color[1] * 255, mat.diffuse_color[2] * 255))
+                    
+                if mat.diffuse_color[3] < 1.0:
+                    style.append("opacity: %f;\n" % mat.diffuse_color[3])
+                
+                # Use any existing texture node to determine primary image
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE':
+                        # Dump & save
+                        img = node.image
+                        if img != None:
+                            # Image file
+                            name = img.filepath
+                            style.append("background-image: url(\"%s.png\");\n" % bpy.path.ensure_ext(bpy.path.basename(name), ''))
+                            
+                            # Background position
+                            uv_min, uv_max = obj.getUVBounds()
+                            style.append("background-position: %i%% %i%%;\n" % (uv_min[0] * 100, uv_min[1] * 100))
+                            
+                            # Background scaling
+                            scale = [uv_max[0] - uv_min[0], 
+                                     uv_max[1] - uv_min[1]]
+                            
+                            # Calculate difference in image scale
+                            sz = img.size
+                            oWidth = sz[0] / (maxb[0] - minb[0])
+                            oHeight = sz[1] / (maxb[1] - minb[1])
+                            
+                            scale[0] = round(scale[0] * 100, 2)
+                            scale[1] = round(scale[1] * 100, 2)
+                            
+                            if oWidth != 1.0 or oHeight != 1.0:
+                                style.append("background-size: %.2f%% %.2f%%;\n" % (scale[0], scale[1]))
+
+            # animation
+            if obj.anim != None:
+                anim = obj.anim
+                
+                duration = anim.len / fps
+                delay = (anim.start-1) / fps
+                
+                style.append("animation-name: %s;\n" % anim.identifier)
+                style.append("animation-duration: %fs;\n" % duration)
+                style.append("animation-delay: %fs;\n" % delay)
+                
+                if scene.cssexportanimloop:
+                    style.append("animation-iteration-count: infinite;\n")
+                if scene.cssexportbakeanim:
+                    style.append("animation-timing-function: linear;\n")
+                
+            style.append("}\n")
+            
+            # Children are part of element
+            if not scene.cssexportcollapsetransforms:
+                self.exportObjects(obj.children, doc, style, scene)
+            
+            doc.append("</div>\n")
+            
+            # Children are part of root
+            if scene.cssexportcollapsetransforms:
+                self.exportObjects(obj.children, doc, style, scene)
+
+
 
 
 export_classes = (
